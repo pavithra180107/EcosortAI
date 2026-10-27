@@ -121,7 +121,7 @@ def get_manual_prediction(item_text, condition, intended, reuse):
         model_name = st.secrets.get("GEMINI_MODEL")
     except Exception:
         pass
-    model_name = model_name or os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
+    model_name = model_name or os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
     model_name = str(model_name).strip().removeprefix("models/")
     if not api_key:
         raise RuntimeError(
