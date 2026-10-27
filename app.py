@@ -130,29 +130,35 @@ if page == "Waste Scanner":
     with left:
         st.markdown("### 01 / Capture an item")
         st.markdown('<div class="small-muted">Place one item against a plain background for a clearer prediction.</div>', unsafe_allow_html=True)
-        camera_image = st.camera_input("Capture waste with your camera", key="camera")
+        camera_image = st.camera_input("Capture waste with your camera", key="camera", label_visibility="visible", help="Use good lighting and keep the item steady.")
         uploaded_image = st.file_uploader("Or upload an image", type=["jpg", "jpeg", "png", "webp"], key="upload")
         selected = camera_image if camera_image is not None else uploaded_image
         if selected is not None:
-            from PIL import Image, ImageOps
+            from PIL import ImageOps
 
-image = ImageOps.exif_transpose(
-    Image.open(selected)
-).convert("RGB")
+            image = ImageOps.exif_transpose(
+                Image.open(selected)
+            ).convert("RGB")
 
-st.image(
-    image,
-    caption=f"Captured image: {image.width} × {image.height} pixels",
-    use_container_width=True,
-)
+            st.image(
+                image,
+                caption=f"Captured image: {image.width} × {image.height} pixels",
+                use_container_width=True,
+            )
 
-st.caption(
-    "For best results, use good lighting, tap to focus, "
-    "and hold the waste item steady."
-)
-    else:
+            st.caption(
+                "For best results, use good lighting, tap to focus, "
+                "and hold the waste item steady."
+            )
+        else:
             image = None
-            st.markdown('<div class="panel"><div class="eyebrow">PHOTO TIPS</div><p>• Keep the item centred<br>• Use good lighting<br>• Avoid several different items in one photo<br>• Never handle a suspicious chemical or leaking battery just to photograph it</p></div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="panel"><div class="eyebrow">PHOTO TIPS</div>'
+                '<p>• Keep the item centred<br>• Use good lighting<br>'
+                '• Avoid several different items in one photo<br>'
+                '• Never handle a suspicious chemical or leaking battery just to photograph it</p></div>',
+                unsafe_allow_html=True,
+            )
     with right:
         st.markdown("### 02 / Condition check")
         st.markdown('<div class="small-muted">A photo cannot prove hygiene, toxicity or structural safety. These inputs help tailor reuse guidance.</div>', unsafe_allow_html=True)
