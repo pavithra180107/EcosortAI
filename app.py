@@ -114,6 +114,15 @@ def get_manual_prediction(item_text, condition, intended, reuse):
     except Exception:
         pass
     api_key = api_key or os.getenv("GEMINI_API_KEY")
+    # Use a currently supported Gemini model. You may override this in
+    # Streamlit Secrets with GEMINI_MODEL if your account uses another model.
+    model_name = None
+    try:
+        model_name = st.secrets.get("GEMINI_MODEL")
+    except Exception:
+        pass
+    model_name = model_name or os.getenv("GEMINI_MODEL") or "gemini-3.8-flash"
+    model_name = str(model_name).strip().removeprefix("models/")
     if not api_key:
         raise RuntimeError(
             "Manual AI recognition needs a Gemini API key. Add GEMINI_API_KEY "
@@ -149,7 +158,7 @@ Rules:
         "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
     }
     req = urllib.request.Request(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + api_key,
+        "https://generativelanguage.googleapis.com/v1beta/models/" + model_name + ":generateContent?key=" + api_key,
         data=json.dumps(payload).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -161,7 +170,16 @@ Rules:
         result = json.loads(answer)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Gemini API returned HTTP {exc.code}. Check your API key, model access, and quota. {detail[:500]}")
+        if exc.code == 404:
+            raise RuntimeError(
+                f"Gemini model '{model_name}' was not found or is unavailable to this API key. "
+                "Check the model name and account access. The default is gemini-3.8-flash. "
+                f"API detail: {detail[:350]}"
+            ) from exc
+        raise RuntimeError(
+            f"Gemini API returned HTTP {exc.code}. Check API key, model access, and quota. "
+            f"API detail: {detail[:350]}"
+        ) from exc
     except (KeyError, IndexError, ValueError) as exc:
         raise RuntimeError("Gemini returned an unexpected response. Please try describing the item more clearly.") from exc
 
