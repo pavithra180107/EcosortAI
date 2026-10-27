@@ -2,6 +2,10 @@ import streamlit as st
 from PIL import Image
 import io
 import pandas as pd
+import os
+import json
+import urllib.request
+import urllib.error
 
 st.set_page_config(page_title="EcoSort AI", page_icon="♻️", layout="wide", initial_sidebar_state="expanded")
 
@@ -102,6 +106,76 @@ def safe_recommendation(categories):
         ordered = ["Inorganic / general"]
     return ordered
 
+def get_manual_prediction(item_text, condition, intended, reuse):
+    """Use Gemini to interpret a manually entered item and return structured waste guidance."""
+    api_key = None
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        pass
+    api_key = api_key or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Manual AI recognition needs a Gemini API key. Add GEMINI_API_KEY "
+            "to Streamlit Cloud → App settings → Secrets, then restart the app."
+        )
+
+    allowed_categories = list(CATEGORY_INFO.keys())
+    prompt = f"""
+You are EcoSort AI, a cautious waste sorting assistant. Interpret the user's product description
+and return only valid JSON (no markdown) with this schema:
+{{
+  "product_name": "short recognised item name",
+  "categories": ["one or more exact categories from {allowed_categories}"],
+  "confidence": 0.0,
+  "reason": "brief explanation of likely material/category",
+  "next_step": "practical disposal, recycling, or reuse recommendation",
+  "safety_note": "specific safety warning, or 'No special warning identified from the description.'"
+}}
+User's item description: {item_text}
+Visible condition: {condition}
+Likely item type / intended use: {intended}
+Reuse preference: {reuse}
+Rules:
+- Use only the exact category names listed in the schema.
+- Do not claim to know hidden ingredients, chemical contents, hygiene, or safety from text alone.
+- If the description is vague, say so in reason and use conservative categories.
+- Batteries/electronics may be E-waste and/or Hazardous; chemicals/leaking containers are Hazardous.
+- Ceramic is not ordinary glass recycling. Local recycling acceptance varies.
+- Confidence must be a number between 0 and 1, not a guarantee.
+"""
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"}
+    }
+    req = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + api_key,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=45) as response:
+            raw = json.loads(response.read().decode("utf-8"))
+        answer = raw["candidates"][0]["content"]["parts"][0]["text"]
+        result = json.loads(answer)
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Gemini API returned HTTP {exc.code}. Check your API key, model access, and quota. {detail[:500]}")
+    except (KeyError, IndexError, ValueError) as exc:
+        raise RuntimeError("Gemini returned an unexpected response. Please try describing the item more clearly.") from exc
+
+    result["categories"] = [c for c in result.get("categories", []) if c in CATEGORY_INFO]
+    if not result["categories"]:
+        result["categories"] = ["Inorganic / general"]
+    result["product_name"] = str(result.get("product_name") or item_text).strip()
+    result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.35))))
+    result["reason"] = str(result.get("reason") or "The description does not provide enough detail for a confident classification.")
+    result["next_step"] = str(result.get("next_step") or "Check local waste collection guidance.")
+    result["safety_note"] = str(result.get("safety_note") or "Do not handle unknown or leaking materials directly.")
+    return result
+
+
 def render_tags(categories):
     return " ".join(f'<span class="tag">{c}</span>' for c in categories)
 
@@ -161,7 +235,21 @@ if page == "Waste Scanner":
             )
     with right:
         st.markdown("### 02 / Condition check")
-        st.markdown('<div class="small-muted">A photo cannot prove hygiene, toxicity or structural safety. These inputs help tailor reuse guidance.</div>', unsafe_allow_html=True)
+        st.markdown('<div class="small-muted">Choose a known item type or type any product manually. Text recognition uses Gemini when configured.</div>', unsafe_allow_html=True)
+        entry_mode = st.radio(
+            "How would you like to identify the item?",
+            ["Use photo AI", "Type manually"],
+            horizontal=True,
+            key="entry_mode",
+        )
+        manual_item = ""
+        if entry_mode == "Type manually":
+            manual_item = st.text_input(
+                "Product / waste item name",
+                placeholder="e.g. swollen laptop battery, expired medicine bottle, mouldy bread",
+                help="Describe the item and, if useful, its material or what is written on the label.",
+                key="manual_item",
+            )
         condition = st.selectbox("Visible condition", [
             "Looks clean and intact", "Dirty / food-contaminated", "Cracked / broken", "Rusty / corroded",
             "Leaking / chemical residue", "Wet / mouldy", "Unknown"
@@ -175,43 +263,80 @@ if page == "Waste Scanner":
             "Assess reuse potential", "Yes, for the original purpose", "Yes, for a different purpose", "No, dispose / recycle"
         ])
         st.markdown("---")
-        analyse = st.button("✦  ANALYSE WASTE", type="primary", use_container_width=True, disabled=(image is None))
+        manual_mode = entry_mode == "Type manually"
+        can_analyse = bool(manual_item.strip()) if manual_mode else image is not None
+        analyse = st.button(
+            "✦  ANALYSE ITEM" if manual_mode else "✦  ANALYSE WASTE",
+            type="primary", use_container_width=True, disabled=not can_analyse
+        )
 
-    if analyse and image is not None:
+    if analyse and (image is not None or (manual_mode and manual_item.strip())):
         try:
-            with st.spinner("Analysing image with the vision model… the first run can take a little while."):
-                results = get_prediction(image)
-            top_idx = CANDIDATES.index(results[0]["label"])
-            categories = MAP.get(top_idx, ["Inorganic / general"])
-            score = float(results[0]["score"])
-            st.session_state.scan_history.insert(0, {
-                "Prediction": LABEL_SHORT[top_idx], "Categories": ", ".join(categories),
-                "Score": round(score * 100, 1), "Condition": condition
-            })
+            manual_result = None
+            if manual_mode:
+                with st.spinner("EcoSort AI is interpreting your item description…"):
+                    manual_result = get_manual_prediction(manual_item.strip(), condition, intended, reuse)
+                predicted_name = manual_result["product_name"]
+                categories = manual_result["categories"]
+                score = manual_result["confidence"]
+                results = []
+                st.session_state.scan_history.insert(0, {
+                    "Prediction": predicted_name,
+                    "Categories": ", ".join(categories),
+                    "Score": round(score * 100, 1),
+                    "Condition": condition,
+                    "Input method": "Manual text",
+                })
+            else:
+                with st.spinner("Analysing image with the vision model… the first run can take a little while."):
+                    results = get_prediction(image)
+                top_idx = CANDIDATES.index(results[0]["label"])
+                predicted_name = LABEL_SHORT[top_idx]
+                categories = MAP.get(top_idx, ["Inorganic / general"])
+                score = float(results[0]["score"])
+                st.session_state.scan_history.insert(0, {
+                    "Prediction": predicted_name, "Categories": ", ".join(categories),
+                    "Score": round(score * 100, 1), "Condition": condition,
+                    "Input method": "Photo",
+                })
+
             st.markdown("---")
             st.markdown("## 03 / Scan results")
             m1, m2, m3 = st.columns(3)
             with m1:
-                st.markdown(f'<div class="metric"><div class="label">TOP AI MATCH</div><div class="value">{LABEL_SHORT[top_idx]}</div></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="metric"><div class="label">TOP AI MATCH</div><div class="value">{predicted_name}</div></div>', unsafe_allow_html=True)
             with m2:
                 st.markdown(f'<div class="metric"><div class="label">MODEL SCORE</div><div class="value">{score:.0%}</div></div>', unsafe_allow_html=True)
             with m3:
                 st.markdown(f'<div class="metric"><div class="label">CATEGORY TAGS</div><div class="value">{len(categories)}</div></div>', unsafe_allow_html=True)
             st.markdown("#### Classification")
             st.markdown(render_tags(categories), unsafe_allow_html=True)
-            if score < 0.35:
-                st.warning("Low model score: treat this as an uncertain guess. Try a clearer photo or manually verify the item.")
-            elif score < 0.60:
-                st.info("Moderate model score: verify the prediction before disposing of the item.")
+
+            if manual_mode and manual_result:
+                st.markdown("#### AI interpretation")
+                st.write(manual_result["reason"])
+                st.markdown("#### Recommended action")
+                st.write(manual_result["next_step"])
+                st.markdown("#### Safety note")
+                st.warning(manual_result["safety_note"])
+                if score < 0.4:
+                    st.info("The AI is uncertain about this description. Add more detail and verify the result before disposal.")
+                st.caption("The confidence score is an AI estimate, not a calibrated probability or safety certification.")
             else:
-                st.success("The model found a relatively strong match among its candidate labels. This is not a calibrated probability or a guarantee.")
-            st.markdown("#### Alternative predictions")
-            df = pd.DataFrame([{
-                "Candidate": LABEL_SHORT[CANDIDATES.index(r["label"])],
-                "Model score": f'{r["score"]:.1%}',
-                "Mapped categories": ", ".join(MAP.get(CANDIDATES.index(r["label"]), []))
-            } for r in results])
-            st.dataframe(df, use_container_width=True, hide_index=True)
+                if score < 0.35:
+                    st.warning("Low model score: treat this as an uncertain guess. Try a clearer photo or manually verify the item.")
+                elif score < 0.60:
+                    st.info("Moderate model score: verify the prediction before disposing of the item.")
+                else:
+                    st.success("The model found a relatively strong match among its candidate labels. This is not a calibrated probability or a guarantee.")
+                st.markdown("#### Alternative predictions")
+                df = pd.DataFrame([{
+                    "Candidate": LABEL_SHORT[CANDIDATES.index(r["label"])],
+                    "Model score": f'{r["score"]:.1%}',
+                    "Mapped categories": ", ".join(MAP.get(CANDIDATES.index(r["label"]), []))
+                } for r in results])
+                st.dataframe(df, use_container_width=True, hide_index=True)
+
             st.markdown("#### Condition & reuse assessment")
             if condition in ["Leaking / chemical residue", "Wet / mouldy"]:
                 st.error("**Reuse status: Do not reuse until professionally assessed.** Avoid direct contact; isolate the item and follow local hazardous-waste guidance if relevant.")
@@ -235,9 +360,9 @@ if page == "Waste Scanner":
                 st.markdown(f"**{cat} — {title}**  \n{detail}")
             if "Hazardous" in categories or "E-waste" in categories or condition == "Leaking / chemical residue":
                 st.error("Safety note: Do not open, crush, burn or dismantle suspected hazardous waste, batteries or electronics. Use an authorised collection route.")
-            st.caption("AI limitation: the model predicts visual similarity to labels. It cannot identify hidden chemicals, prove contamination levels, or certify an item as safe to reuse.")
+            st.caption("AI limitation: recommendations are guidance only. Text or image analysis cannot identify hidden chemicals, prove contamination levels, or certify an item as safe to reuse.")
         except Exception as e:
-            st.error("The AI model could not load or analyse this image. On the first run, model download may take several minutes. Check the deployment logs and internet/model access.")
+            st.error("EcoSort AI could not analyse this item. For manual recognition, check your Gemini API key, model access, and quota. For photo analysis, check model download and deployment logs.")
             st.exception(e)
 
 elif page == "Category Guide":
@@ -262,7 +387,7 @@ elif page == "Scan History":
 
 elif page == "About the AI":
     st.markdown("### How the prototype works")
-    st.write("EcoSort AI uses OpenAI CLIP (ViT-B/32) through Hugging Face Transformers in zero-shot image-classification mode. It compares the image with a fixed list of candidate descriptions and ranks the visual matches.")
+    st.write("Photo mode uses OpenAI CLIP (ViT-B/32) through Hugging Face Transformers to rank a fixed list of candidate descriptions. Type manually mode uses Gemini to interpret arbitrary item descriptions and return likely categories and cautious disposal guidance. Manual mode requires GEMINI_API_KEY in Streamlit secrets or the environment.")
     st.write("The model score is a relative score across the candidate labels, not a medically or scientifically calibrated probability. Category mapping is a transparent rule layer on top of the top image match.")
     st.write("Condition and reuse recommendations are conservative guidance informed by the user's condition selection. The prototype does not independently certify the item's safety.")
     st.markdown("### Next improvements")
