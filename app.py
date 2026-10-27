@@ -150,7 +150,7 @@ st.caption(
     "For best results, use good lighting, tap to focus, "
     "and hold the waste item steady."
 )
-else:
+    else:
             image = None
             st.markdown('<div class="panel"><div class="eyebrow">PHOTO TIPS</div><p>• Keep the item centred<br>• Use good lighting<br>• Avoid several different items in one photo<br>• Never handle a suspicious chemical or leaking battery just to photograph it</p></div>', unsafe_allow_html=True)
     with right:
